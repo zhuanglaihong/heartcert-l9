@@ -54,18 +54,23 @@ uv sync                                       # 同步虚拟环境
 | **X-RAG Agent** | WebSocket 代码 Diff / 语音文本流 | 弹窗异常追问（防抖触发，非 Diff 频率驱动） |
 | **Oracle Judge Agent** | `Role_Schemas` + `Battle_Log` | 三位一体数据包（见下方格式） |
 
-Oracle Judge 输出必须通过 Pydantic 强验证，格式固定为：
+Oracle Judge 输出必须通过 Pydantic 强验证，包含双轨输出：
 
 ```json
 {
   "judge_result": {
-    "vector_updates": [{"atom_id": 145, "score": 0.85, "rationale": "..."}],
+    "vector_updates": [{"atom_id": 145, "score": 0.85, "rationale": "event#3 [t=312s]: ..."}],
+    "dense_vector_1024": [0.0, ..., 0.85, ..., 0.02],
     "verified_skills": ["Golang", "Redis"],
     "reranker_payload": "150词以内核心战役摘要",
-    "combat_confidence": 0.88
+    "combat_confidence": 0.88,
+    "last_certified_at": "2026-04-28T15:30:00Z",
+    "vector_construction_log": "直接考察 N 个; 简历声称未验证 M 个赋基线 0.02; 无关 K 个赋 0.0"
   }
 }
 ```
+
+`dense_vector_1024`：长度精确 1024，`array[atom_id-1]` = 对应评分；简历声称但未验证 → 0.02（平滑化基线）；完全无关 → 0.0。
 
 ### 三层向量架构
 
@@ -104,6 +109,68 @@ PROVISIONING → COMBAT_ACTIVE → EVALUATING → CERTIFIED
 ```
 
 - `PROVISIONING` 超时 >15s → 降级到静态 `Fallback_Blueprint`
+
+---
+
+## 核心设计原则（来自 `docs/方案设计.md`，指导所有实现决策）
+
+1. **分数与向量分离**：分数用于解释（`question_ability_scores`），向量用于召回（`candidate_vectors`），禁止混用。
+2. **不可覆写，只可追加**：候选人全局画像禁止直接 UPDATE，必须由来源事件（`candidate_ability_contributions`）重算得出。
+3. **重做 = 替换快照，非累加**：某 assessment 重做时，先将旧贡献 `is_active=false`，再写入新版本，只重算受影响的候选人。
+4. **1024D 只做末层精排**：1024 维向量不做全库粗搜，粗搜用 32D，中搜用 128D，减少内存和计算压力。
+5. **企业需求侧三层向量化**：每次 B 端搜索必须固化为 `job_requirement_profiles`（含 `target_vec_32/128/1024`），不能只留 `query_text`，支持重放和权重调整。
+
+---
+
+## 评分计算公式（来自 `docs/方案设计.md`）
+
+```
+单题掌握度：  question_mastery = Σ(weight_i × normalized_score_i)
+单题最终分：  question_final_score = question_mastery × question_full_mark
+单场 1024 聚合：同 assessment_id + ability_id 的多题贡献，用 weighted_mean(contribution_score, question_weight)
+跨场聚合 V1：candidate_id + ability_id，按 assessment_ability_aggregates.score 做均值
+跨场聚合 V2：EMA（最近一次权重更高）
+128/32 汇聚：统一用 ability_taxonomy_edges.weight 加权，禁止手写 if/else 映射
+```
+
+---
+
+## 数据血缘全链路（系统的核心不变量）
+
+```
+题目实例(assessment_question_instances)
+  → 题目能力绑定(question_ability_bindings)
+  → 题目能力评分(question_ability_scores)
+  → 单场能力聚合(assessment_ability_aggregates)
+  → 跨场贡献账本(candidate_ability_contributions)
+  → 候选人能力快照(candidate_ability_snapshots)
+  → 三层向量发布(candidate_vectors: 32D/128D/1024D)
+  → 分层召回(L1→L2→L3+sparse)
+  → RRF 融合 → Cross-Encoder Rerank
+```
+
+任一候选人的任一能力值，必须能追溯到具体 assessment 和具体题目。
+
+---
+
+## 迁移顺序（切线上必须遵守，见 `docs/方案设计.md` 第八章）
+
+1. 建 taxonomy 和 contribution 表，不切线上读路径
+2. 新评分链路双写：旧表继续写，新表同步写
+3. 回填历史 assessment 到 `candidate_ability_contributions`
+4. 生成 `candidate_vectors` 三层向量
+5. 上新搜索 pipeline，灰度对比旧搜索
+6. 稳定后将 `candidates.skill_vector` 降级为兼容字段
+
+---
+
+## 验收标准（来自 `docs/方案设计.md` 第九章）
+
+1. 任一候选人任一能力值，可追溯到具体 assessment 和题目
+2. 同一 assessment 重做后，不会重复累计旧贡献
+3. 搜索请求能保存为 profile 并可重放
+4. 检索链路日志可见每层召回数量、分数和淘汰原因
+5. rerank 结果能解释 A 排在 B 前的原因
 
 ---
 
