@@ -85,39 +85,150 @@
 
 ## Task 2 · 工作流编排与 Schema（20%）
 
-### 状态机（`workflow/state_machine.py`）
+### FSM 状态机（`workflow/state_machine.py`）
+
+#### 状态转换图
 
 ```
-PROVISIONING ──[BLUEPRINT_READY]──→ COMBAT_ACTIVE
-PROVISIONING ──[BLUEPRINT_TIMEOUT]─→ COMBAT_ACTIVE（used_fallback=True）
-PROVISIONING ──[CHEAT_DETECTED]───→ FAILED
-COMBAT_ACTIVE ─[BATTLE_COMPLETE]──→ EVALUATING
-COMBAT_ACTIVE ─[CHEAT_DETECTED]───→ FAILED
-EVALUATING ────[JUDGE_COMPLETE]───→ CERTIFIED
-EVALUATING ────[JUDGE_TIMEOUT]────→ FAILED
+                    ┌─────────────────────────────────────────────────┐
+                    │               L9 Combat FSM                     │
+                    └─────────────────────────────────────────────────┘
 
-熔断：PROVISIONING 超时 15s → 自动降级 Fallback_Blueprint
-熔断：EVALUATING   超时 60s → FAILED
-终态保护：CERTIFIED/FAILED 拒绝一切后续事件（_TERMINAL_STATES 守卫）
+  [开始]
+    │
+    ▼
+PROVISIONING ──[BLUEPRINT_READY]──────────────────────────→ COMBAT_ACTIVE
+    │                                                              │
+    ├──[BLUEPRINT_TIMEOUT / >15s]──→ COMBAT_ACTIVE (fallback=True)│
+    │                                                              │
+    └──[CHEAT_DETECTED]──────────────────────────────────→ FAILED │
+                                                                   │
+                                               [BATTLE_COMPLETE]   │
+                                                    │              │
+                                                    ▼              │
+                                               EVALUATING ←────────┘
+                                                    │
+                                    ┌───────────────┴───────────────┐
+                                    │                               │
+                              [JUDGE_COMPLETE]              [JUDGE_TIMEOUT / >60s]
+                                    │                         [CHEAT_DETECTED]
+                                    ▼                               ▼
+                               CERTIFIED                         FAILED
+                           （终态，拒绝一切后续事件）        （终态，拒绝一切后续事件）
 ```
 
-工程修复：移除死变量 `battlefield_coro`；`CombatSession` 新增 `combat_ended_at`
-和 `battle_duration_sec` 属性；X-RAG 调用传递 `previous_challenges` 防重复攻击。
+#### 熔断机制（CircuitBreaker）
+
+两处熔断均使用同一个 `CircuitBreaker` 类，基于 `asyncio.wait_for` 实现：
+
+```python
+class CircuitBreaker:
+    # 包裹异步 Agent 调用，超时 → fallback；业务异常（JSON 解析失败）直接上抛
+    async def call(self, coro, *fallback_args, **fallback_kwargs):
+        try:
+            return await asyncio.wait_for(coro, timeout=self._timeout)
+        except asyncio.TimeoutError:
+            return await self._fallback(*fallback_args, **fallback_kwargs)
+
+# 熔断 1：Battlefield Agent 超时 15s → 自动切换 Fallback_Blueprint
+provisioning_breaker = CircuitBreaker(timeout_sec=15, fallback_fn=_fallback_blueprint)
+
+# 熔断 2：Oracle Judge 超时 60s → 状态机推进到 FAILED
+evaluating_breaker = CircuitBreaker(timeout_sec=60, fallback_fn=_judge_timeout_fallback)
+```
+
+#### 4 个 Agent 编排伪代码（`run_l9_combat`）
+
+```
+阶段 1 — Ingestion Agent
+  输入：resume_text + ability_library + role_schema_atom_ids
+  输出：CandidateDNA（Pydantic 强验证，含 char_offset 可追溯证据链）
+  → 不进入 FSM，作为后续阶段的输入数据
+
+阶段 2 — Battlefield Agent（CircuitBreaker 15s）
+  正常路径：blueprint = await battlefield_agent.run(dna, role_schema)
+            fsm.transition(BLUEPRINT_READY, {blueprint_id})
+  降级路径：blueprint = await fallback_blueprint_fn(role, language)
+            fsm.transition(BLUEPRINT_TIMEOUT, {fallback_blueprint_id})
+            session.used_fallback = True
+
+阶段 3 — X-RAG Agent（WebSocket 事件驱动，非 Diff 频率）
+  注册 on_trigger_event 回调到 WebSocket handler
+  触发条件：trigger_event.type == "test_failure" 或 "checkpoint(>5min)"
+  每次触发：xrag_agent.run(trigger_event, code_diff, blueprint_context,
+                           track, previous_challenges)  # 防重复攻击
+  注入成功：session.battle_log.append(xrag_challenge_entry)
+           previous_challenges.append({challenge_id, simulated_failure})
+  战役结束：fsm.transition(BATTLE_COMPLETE, {battle_log})
+
+阶段 4 — Oracle Judge Agent（CircuitBreaker 60s）
+  输入：role_schema + battle_log + candidate_dna（用于 1024D 平滑化）
+  正常路径：judge_result = await oracle_judge_agent.run(...)
+            fsm.transition(JUDGE_COMPLETE, {judge_result})  → CERTIFIED
+  超时路径：fsm.transition(JUDGE_TIMEOUT)                  → FAILED
+```
+
+#### Harness Engineering 核心能力
+
+| 能力 | 实现 |
+|------|------|
+| **输出强约束** | 所有 Agent 输出通过 Pydantic `model_validate()` 验证，不合规直接抛异常，不进入下游 |
+| **Prompt Injection 防御** | 4 个 Agent System Prompt 均有 `## PROMPT INJECTION DEFENSE` 段落，检测到注入写 `_security` 字段 |
+| **熔断降级** | `CircuitBreaker` 包裹两个有超时风险的 LLM 调用，降级路径有明确的状态机语义 |
+| **终态守卫** | `_TERMINAL_STATES` 在 `transition()` 入口拦截，CERTIFIED/FAILED 之后任何事件都抛 `InvalidTransitionError` |
+| **防重复攻击** | `previous_challenges` 列表跨整个 COMBAT_ACTIVE 阶段存活，X-RAG 每次调用带入，禁止对同一故障点二次注入 |
+| **自适应难度** | `_compute_difficulty_delta` 根据 battle_log 中 fix/fail 比实时计算 difficulty_delta，传入 X-RAG |
+| **全链路可追溯** | `session.state_history` 记录每次转换的 from/to/event/timestamp，`battle_log` 记录每次 X-RAG 注入 |
+
+---
 
 ### 极客认证报告 Schema（`schemas/geek_cert_report.schema.json`）
 
-核心字段：
+#### 完整字段（15 个，从 Pydantic 模型自动生成，无硬编码）
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `cert_id` | UUID | 证书唯一标识 |
-| `radar_chart` | Array[6] | 6 维雷达图（系统设计/并发控制/故障降级/代码质量/调试能力/架构判断） |
-| `top_abilities` | Array | 战役中验证的原子能力列表（atom_id + score + evidence） |
-| `anti_forgery.signature` | string | HMAC-SHA256 防伪签名（cert_id:issued_at:candidate_id） |
-| `vec_32_summary` | Array[32] | 32 维宏观向量摘要，用于前端可视化 |
-| `reranker_payload` | string | ≤150 词战役摘要，B 端检索弹药 |
+| 字段 | 类型 | 约束 | 说明 |
+|------|------|------|------|
+| `cert_id` | string | required | UUID 证书唯一标识 |
+| `candidate_id` | string | required | 候选人 ID，透传自 CombatSession |
+| `session_id` | string | required | 链接回 CombatSession，支持战役完整追溯 |
+| `role` | string | required | 参测岗位 |
+| `issued_at` | string | required | ISO8601 签发时间 |
+| `expires_at` | string | required | 有效期（`timedelta(days=730)`，避免闰年 2 月 29 日 ValueError） |
+| `used_fallback` | boolean | default: false | 本次战役是否触发了 PROVISIONING 降级 |
+| `battle_duration_sec` | integer\|null | optional | 实际战役耗时（秒），用于 `combat_confidence` 公式验证 |
+| `combat_confidence` | number | [0.0, 1.0] | `min(1.0, actual_time / expected_time)`，公式推导，非主观估值 |
+| `radar_chart` | Array[6] | minItems=maxItems=6 | 6 维雷达图，每维含 score、percentile、atom_ids_covered |
+| `top_abilities` | Array | — | 战役验证原子能力（atom_id 1-1024 + score + evidence_snippet） |
+| `combat_highlights` | Array | — | 战役亮点切片，含 event_type/timestamp_sec/score_impact，供前端时间轴渲染 |
+| `reranker_payload` | string | maxLength=900 | ≤150 词战役摘要，B 端混合检索弹药 |
+| `anti_forgery` | object | — | HMAC-SHA256 防伪签名，payload=`cert_id:issued_at:candidate_id` |
+| `vec_32_summary` | Array[32] | minItems=maxItems=32 | 32 维宏观向量摘要，前端雷达图可视化用 |
 
-→ 查看完整 Mock 示例：[`schemas/geek_cert_report.example.json`](schemas/geek_cert_report.example.json)
+#### 防伪确权机制
+
+```python
+# 签名 key 从环境变量读取，测试环境有固定回退值
+_SIGNING_KEY = os.environ.get("HEARTCERT_SIGNING_KEY", "heartcert-dev-key-...").encode()
+
+def _sign(cert_id, issued_at, candidate_id) -> str:
+    payload = f"{cert_id}:{issued_at}:{candidate_id}".encode()
+    return hmac.new(_SIGNING_KEY, payload, hashlib.sha256).hexdigest()
+
+# 验证方：用同样的 key 重新计算签名，与 anti_forgery.signature 对比
+```
+
+#### Mock 工厂无硬编码原则
+
+```python
+def mock_report(...) -> GeekCertReport:
+    rng = random.Random(uuid.uuid4().int)  # 每次调用独立 seed，保证两次输出完全不同
+    # 雷达图分数：rng.uniform(40.0, 95.0)
+    # atom_ids_covered：rng.sample(range(1, 1025), k=rng.randint(3, 5))
+    # 战役亮点时间戳：rng.sample(range(60, duration), ...) 无重复采样
+    # reranker_payload：从 _FAULT_SCENARIOS / _BUG_FIX_METHODS 池动态组合
+```
+
+→ 查看完整 Mock 示例（含签名）：[`schemas/geek_cert_report.example.json`](schemas/geek_cert_report.example.json)
 
 ---
 
