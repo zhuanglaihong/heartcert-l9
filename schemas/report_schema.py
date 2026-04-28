@@ -7,11 +7,10 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import os
 import random
-import secrets
 import uuid
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime, timedelta, timezone
 
 from pydantic import BaseModel, Field
 
@@ -33,10 +32,10 @@ class AtomAbility(BaseModel):
 
 
 class CombatHighlight(BaseModel):
-    event_type: str  # e.g. "xrag_injection", "bug_fix", "timeout_defense"
+    event_type: str  # "xrag_injection" | "bug_fix" | "timeout_defense" | "architecture_pivot"
     timestamp_sec: int
     description: str
-    score_impact: float  # delta on combat_confidence
+    score_impact: float  # combat_confidence 的 delta 贡献（正负均可）
 
 
 class AntiForgeryStamp(BaseModel):
@@ -44,7 +43,8 @@ class AntiForgeryStamp(BaseModel):
     issued_at: str  # ISO 8601
     issuer: str = "HeartCert Oracle v2"
     algorithm: str = "HMAC-SHA256"
-    signature: str  # hex digest
+    # payload = cert_id:issued_at:candidate_id，HMAC-SHA256 hex digest
+    signature: str
 
 
 # ─── Root Report Model ────────────────────────────────────────────────────────
@@ -52,45 +52,43 @@ class AntiForgeryStamp(BaseModel):
 class GeekCertReport(BaseModel):
     cert_id: str
     candidate_id: str
+    # session_id 链接回 CombatSession，支持战役追溯
+    session_id: str
     role: str
     issued_at: str
     expires_at: str
+    # 是否使用了 Fallback_Blueprint（PROVISIONING 超时降级）
+    used_fallback: bool = False
+    # 战役实际耗时（秒），用于验证 combat_confidence 公式
+    battle_duration_sec: int | None = None
     combat_confidence: float = Field(..., ge=0.0, le=1.0)
 
-    # 多维雷达图（6 维）
+    # 多维雷达图（6 维，对应 role_schema 的 6 大考核维度）
     radar_chart: list[RadarDimension] = Field(..., min_length=6, max_length=6)
 
-    # 前 N 个验证原子能力
+    # 战役中验证的原子能力列表（仅 battle_log 有事件支撑的 atom_id）
     top_abilities: list[AtomAbility]
 
-    # 战役亮点切片
+    # 战役亮点切片（前端时间轴渲染用）
     combat_highlights: list[CombatHighlight]
 
-    # B 端 rerank 弹药
+    # B 端 rerank 弹药（≤150 词，语义检索用）
     reranker_payload: str = Field(..., max_length=900)
 
     # 防伪确权标识
     anti_forgery: AntiForgeryStamp
 
-    # 原始分向量摘要（32 维宏观层，用于前端可视化）
+    # 32 维宏观向量摘要（candidate_vectors.ability_vec_32，前端可视化用）
     vec_32_summary: list[float] = Field(..., min_length=32, max_length=32)
 
 
-# ─── Mock Factory（动态生成，无硬编码）────────────────────────────────────────
+# ─── 签名工具 ─────────────────────────────────────────────────────────────────
 
-_DIMENSION_NAMES = [
-    "系统设计", "并发控制", "故障降级", "代码质量", "调试能力", "架构判断"
-]
-
-_ABILITY_NAMES = {
-    # 示例映射（实际由 ability_library 动态加载）
-    145: "Redis 分布式锁", 42: "Go 并发模型", 301: "PostgreSQL 索引优化",
-    512: "熔断降级模式", 88: "内存泄漏诊断", 200: "微服务 RPC 设计",
-    777: "CAS 乐观锁", 633: "连接池调优", 900: "gRPC 流式处理",
-    1001: "容器资源限制", 55: "SQL 执行计划", 410: "缓存穿透防护",
-}
-
-_SIGNING_KEY = b"heartcert-internal-key-do-not-leak"
+# 生产环境从 HEARTCERT_SIGNING_KEY 环境变量读取；测试环境使用固定回退值
+_SIGNING_KEY: bytes = os.environ.get(
+    "HEARTCERT_SIGNING_KEY",
+    "heartcert-dev-key-not-for-production",
+).encode()
 
 
 def _sign(cert_id: str, issued_at: str, candidate_id: str) -> str:
@@ -98,84 +96,130 @@ def _sign(cert_id: str, issued_at: str, candidate_id: str) -> str:
     return hmac.new(_SIGNING_KEY, payload, hashlib.sha256).hexdigest()
 
 
-def mock_report(candidate_id: str | None = None, role: str = "AI 后端工程师") -> GeekCertReport:
+# ─── Mock Factory（动态生成，无硬编码固定值）────────────────────────────────
+
+_DIMENSION_NAMES = [
+    "系统设计", "并发控制", "故障降级", "代码质量", "调试能力", "架构判断"
+]
+
+_ABILITY_POOL: dict[int, str] = {
+    145: "Redis 分布式锁",
+    42:  "Go 并发模型",
+    301: "PostgreSQL 索引优化",
+    512: "熔断降级模式",
+    88:  "内存泄漏诊断",
+    200: "微服务 RPC 设计",
+    777: "CAS 乐观锁",
+    633: "连接池调优",
+    900: "gRPC 流式处理",
+    55:  "SQL 执行计划",
+    410: "缓存穿透防护",
+    720: "分布式追踪",
+}
+
+_FAULT_SCENARIOS = [
+    "Redis 主节点宕机", "连接池耗尽（max_open_conns=0）", "goroutine 泄漏（channel 未关闭）",
+    "分布式死锁（context 未传递）", "GIL 竞争导致数据不一致",
+]
+
+_BUG_FIX_METHODS = [
+    "添加 context.WithTimeout 并实现 fallback 降级",
+    "在 defer 中正确关闭 connection，消除资源泄漏",
+    "引入 Redis Lua 脚本保证原子性",
+    "用 sync.Once 替换裸 goroutine，修复 race condition",
+]
+
+
+def mock_report(
+    candidate_id: str | None = None,
+    session_id: str | None = None,
+    role: str = "AI 后端工程师",
+    used_fallback: bool = False,
+    battle_duration_sec: int | None = None,
+) -> GeekCertReport:
     """
     动态生成极客认证报告 Mock 数据。
-    所有随机数使用 secrets / random（带 seed 隔离），禁止魔法数字。
+    每次调用使用独立 RNG seed（uuid4().int），保证无两次相同输出，禁止魔法数字。
     """
-    rng = random.Random(uuid.uuid4().int)  # 每次调用独立 seed，无硬编码固定值
+    rng = random.Random(uuid.uuid4().int)
 
     cid = candidate_id or str(uuid.uuid4())
+    sid = session_id or str(uuid.uuid4())
     cert_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     issued_at = now.isoformat()
-    expires_at = now.replace(year=now.year + 2).isoformat()
+    # 使用 timedelta 避免 replace(year=...) 在闰年 2 月 29 日抛 ValueError
+    expires_at = (now + timedelta(days=730)).isoformat()
 
-    # 雷达图（6 维，分数随机但总体合理）
-    radar: list[RadarDimension] = []
-    for dim_name in _DIMENSION_NAMES:
-        score = round(rng.uniform(40.0, 95.0), 1)
-        percentile = round(rng.uniform(50.0, 99.0), 1)
-        # 每维随机绑定 3–5 个原子 ID
-        atom_sample = rng.sample(range(1, 1025), k=rng.randint(3, 5))
-        radar.append(RadarDimension(
+    duration = battle_duration_sec if battle_duration_sec is not None else rng.randint(480, 1800)
+
+    # 雷达图：6 维，每维随机绑定 3–5 个原子 ID
+    radar: list[RadarDimension] = [
+        RadarDimension(
             dimension_name=dim_name,
-            score=score,
-            percentile=percentile,
-            atom_ids_covered=atom_sample,
-        ))
-
-    # 前 5 个验证能力（从已知 ability 池中随机抽取）
-    sampled_atoms = rng.sample(list(_ABILITY_NAMES.items()), k=min(5, len(_ABILITY_NAMES)))
-    top_abilities = [
-        AtomAbility(
-            atom_id=atom_id,
-            ability_name=name,
-            score=round(rng.uniform(0.6, 1.0), 2),
-            evidence_snippet=f"在沙盒战役 event#{rng.randint(1, 10)} 中实际验证，耗时 {rng.randint(3, 15)} 分钟完成修复",
+            score=round(rng.uniform(40.0, 95.0), 1),
+            percentile=round(rng.uniform(50.0, 99.0), 1),
+            atom_ids_covered=rng.sample(range(1, 1025), k=rng.randint(3, 5)),
         )
-        for atom_id, name in sampled_atoms
+        for dim_name in _DIMENSION_NAMES
     ]
 
-    # 战役亮点
-    event_types = ["xrag_injection", "bug_fix", "timeout_defense", "architecture_pivot"]
+    # 战役验证能力（从 ability_pool 中随机抽取，score 仅含实战支撑的高分段）
+    sampled = rng.sample(list(_ABILITY_POOL.items()), k=min(5, len(_ABILITY_POOL)))
+    top_abilities = [
+        AtomAbility(
+            atom_id=aid,
+            ability_name=name,
+            score=round(rng.uniform(0.6, 1.0), 2),
+            evidence_snippet=(
+                f"event#{rng.randint(1, 10)} [t={rng.randint(120, duration)}s]: "
+                f"{rng.choice(_BUG_FIX_METHODS)}"
+            ),
+        )
+        for aid, name in sampled
+    ]
+
+    # 战役亮点（2–4 条，时间戳不重复）
+    ts_pool = sorted(rng.sample(range(60, duration), k=min(4, duration - 60)))
     highlights = [
         CombatHighlight(
-            event_type=rng.choice(event_types),
-            timestamp_sec=rng.randint(60, 3000),
-            description=f"候选人在 {rng.choice(['Redis 宕机', '连接池耗尽', '死锁注入'])} 场景下完成实时重构",
-            score_impact=round(rng.uniform(-0.1, 0.2), 2),
+            event_type=rng.choice(["xrag_injection", "bug_fix", "timeout_defense", "architecture_pivot"]),
+            timestamp_sec=ts,
+            description=f"候选人在 {rng.choice(_FAULT_SCENARIOS)} 场景下，{rng.choice(_BUG_FIX_METHODS)}",
+            score_impact=round(rng.uniform(-0.08, 0.18), 2),
         )
-        for _ in range(rng.randint(2, 4))
+        for ts in ts_pool[:rng.randint(2, 4)]
     ]
 
     combat_confidence = round(rng.uniform(0.55, 0.95), 2)
 
+    # reranker_payload：≤150 词，面向 B 端语义检索，无空洞评价词
+    skill_names = ", ".join(a.ability_name for a in top_abilities[:3])
+    fault = rng.choice(_FAULT_SCENARIOS)
+    fix = rng.choice(_BUG_FIX_METHODS)
     reranker_payload = (
-        f"候选人在归心私有 RPC 框架沙盒中，于 {rng.randint(8, 25)} 分钟内定位并修复了"
-        f" {rng.choice(['goroutine 泄漏', 'Redis 分布式锁死锁', '连接池耗尽'])}问题，"
-        f"展现了 {rng.choice(['强并发控制能力', '精准的故障降级思维', '扎实的系统设计判断力'])}。"
-        f"X-RAG 注入 {rng.randint(1, 3)} 次异常，全部有效应对。"
-        f"verified_skills: {', '.join(a.ability_name for a in top_abilities[:3])}。"
+        f"候选人在归心私有 RPC 框架沙盒中，{duration // 60} 分钟内定位并修复了「{fault}」，"
+        f"采用「{fix}」。X-RAG 共注入 {rng.randint(1, 3)} 次异常，全部完成即时重构。"
+        f"已验证能力：{skill_names}。"
+        f"暴露短板：{rng.choice(['边界条件处理不完整', '超时传递链断裂', '降级路径缺失幂等保护'])}。"
     )
 
-    # 32 维宏观向量摘要（mock，0.0–1.0）
+    # 32 维宏观向量摘要（0.0–1.0）
     vec_32 = [round(rng.uniform(0.0, 1.0), 4) for _ in range(32)]
 
-    # 防伪标识
+    # 防伪确权标识（HMAC-SHA256）
     sig = _sign(cert_id, issued_at, cid)
-    stamp = AntiForgeryStamp(
-        cert_id=cert_id,
-        issued_at=issued_at,
-        signature=sig,
-    )
+    stamp = AntiForgeryStamp(cert_id=cert_id, issued_at=issued_at, signature=sig)
 
     return GeekCertReport(
         cert_id=cert_id,
         candidate_id=cid,
+        session_id=sid,
         role=role,
         issued_at=issued_at,
         expires_at=expires_at,
+        used_fallback=used_fallback,
+        battle_duration_sec=duration,
         combat_confidence=combat_confidence,
         radar_chart=radar,
         top_abilities=top_abilities,
