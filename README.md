@@ -1,7 +1,6 @@
 # HeartCert L9 — AI 动态出题与 B 端混合检索全链路重构
 
 **技术栈：** Python FastAPI · Supabase PostgreSQL · pgvector · uv  
-**测试：** `52 passed` · `uv run pytest tests/ -v`
 
 ---
 
@@ -27,7 +26,7 @@
 
 ## Task 1 · Agent System Prompts（30%）
 
-每个 Prompt 均有**编号铁律**、**强制 JSON 格式**、**自检清单**，无套话。
+每个 Prompt 均有**编号铁律**、**强制 JSON Schema**、**自检清单**、**Prompt Injection Defense** 段落，无套话。
 
 ### Ingestion Agent（简历解析）
 > `agents/ingestion_agent.py` — `INGESTION_SYSTEM_PROMPT`
@@ -36,7 +35,8 @@
 铁律：
 1. 只提取，不推断——简历未出现的字段填 null，禁止根据常识补全
 2. atom_ids 只能来自 ability_library（0001–1024），禁止自创
-3. 每个 atom_id 必须附 evidence_quote（简历原文引用）
+3. 每个 atom_id 必须附 evidence_quote（简历原文引用）+ char_offset_in_resume（字符偏移，
+   供 Python 做 resume_text[offset:offset+len(quote)] == quote 精确校验）
 4. confidence > 0.5 须有项目数据佐证，否则上限 0.5
 5. 输出纯 JSON，无任何 markdown 包裹
 ```
@@ -50,6 +50,8 @@
 2. bug 必须真实存在于代码中，禁止注释提示 bug 位置
 3. 假文档需包含 QuickStart/API Reference/配置说明，且与代码行为有细微偏差
 4. 必须同时生成 fallback_blueprint（PROVISIONING 超时降级用）
+5. 输出 target_atom_ids（本残卷考察的 atom_id 列表），供 Oracle Judge 精准对齐
+6. bug_location 移入 audit 对象（标注 INTERNAL ONLY，禁止前端展示）
 ```
 
 ### X-RAG Agent（动态追问）
@@ -61,18 +63,22 @@
 2. 追问必须模拟外部系统故障（Redis 宕机/连接池耗尽），禁止提概念题
 3. 必须指向具体文件名 + 函数名，禁止泛问
 4. 每次只出一问，禁止连发
+5. modal_question ≤ 200 字符，参数 previous_challenges 防止重复攻击同一漏洞
+6. track = "code" | "prd" 双链路：产品/架构岗走业务矛盾追问分支
 ```
 
 ### Oracle Judge Agent（确权决策）
 > `agents/oracle_judge_agent.py` — `ORACLE_JUDGE_SYSTEM_PROMPT`
 
 ```
-铁律：
-1. 只对 role_schema.atom_ids 列表中的 ID 打分，库外 ID 禁止出现
-2. rationale 必须引用 battle_log 具体事件（含时间戳/事件 ID）
-3. reranker_payload ≤ 150 词
-4. combat_confidence = min(1.0, actual_time / expected_time)，不得主观估值
-5. 未被战役覆盖的 atom_id 分数必须为 0.0，禁止推测
+铁律（双轨输出）：
+1. vector_updates（稀疏）：只对 battle_log 中有事件支撑的 atom_id 打 0.0–1.0 分，
+   rationale 格式强制：event#N [t=Ts|kind=K]: ≤80字事实
+2. dense_vector_1024（密集，1024 维）：array[atom_id-1] = 对应分；
+   简历声称但未实战验证 → 0.02（平滑化基线，避免维度诅咒）；完全无关 → 0.0
+3. last_certified_at（ISO8601）：B 端时间衰减因子 e^(-λΔt) 的基准时间点
+4. vector_construction_log：平滑化决策的可审计摘要
+5. reranker_payload ≤ 150 词，combat_confidence 公式不得主观估值
 ```
 
 ---
@@ -92,7 +98,11 @@ EVALUATING ────[JUDGE_TIMEOUT]────→ FAILED
 
 熔断：PROVISIONING 超时 15s → 自动降级 Fallback_Blueprint
 熔断：EVALUATING   超时 60s → FAILED
+终态保护：CERTIFIED/FAILED 拒绝一切后续事件（_TERMINAL_STATES 守卫）
 ```
+
+工程修复：移除死变量 `battlefield_coro`；`CombatSession` 新增 `combat_ended_at`
+和 `battle_duration_sec` 属性；X-RAG 调用传递 `previous_challenges` 防重复攻击。
 
 ### 极客认证报告 Schema（`schemas/geek_cert_report.schema.json`）
 
@@ -113,7 +123,7 @@ EVALUATING ────[JUDGE_TIMEOUT]────→ FAILED
 
 ## Task 3 · 存量架构重构（20%）
 
-### 老架构 9 条系统性缺陷（`migrations/README_audit.md`）
+### 老架构 9+3 条系统性缺陷（`migrations/README_audit.md`）
 
 > 基于逐行阅读 `docs/schema.md` 得出，每条均标注具体表名和字段名：
 
@@ -128,6 +138,9 @@ EVALUATING ────[JUDGE_TIMEOUT]────→ FAILED
 | 7 | 以 JSONB 存向量，3–5× 空间浪费 + 类型逃逸 | `vector_update_logs.previous_vector / new_vector` |
 | 8 | 唯一约束引发并发重算竞争 | `embedding_queue` UNIQUE `(candidate_id, embedding_type)` |
 | 9 | 静态题库无稳定主键，动态题目无法绑定原子能力 | `interview_interactions.question_id NULL` |
+| A | `ability_library` 静态底座完全缺失，atom_id FK 无锚点 | 全系统缺少不可变原子能力表，越界 ID 无声写入 |
+| B | `ability_taxonomy_nodes` 缺失 atom_id 桥接列，O(1) 映射不可达 | Oracle Judge 整数 atom_id → UUID 需全表扫 |
+| C | `to_tsvector(jsonb->>'array_field')` 模式，BM25 索引静默失效 | `idx_candidates_verified_skills_fts`（返回 JSON 序列化串，FTS 永远匹配空集） |
 
 ### 新 DDL 要点（`migrations/001_new_tables.sql` + `migrations/002_indexes_hnsw.sql`）
 
@@ -150,10 +163,11 @@ POST /search
     ├─ Query Parser → target_vec_32/128/1024 + extracted_tags
     ├─ Filter Gate  → 城市/薪资/经验硬过滤（→ ~400 候选人）
     │
-    ├─ L1 粗召回   32D  HNSW → top 200
-    ├─ L2 中召回  128D  HNSW → top 80   (仅在 L1 结果集上)
-    ├─ L3 精召回 1024D  HNSW → top 40   (仅在 L2 结果集上)
-    ├─ Sparse 补漏  GIN BM25 → top 40   (补 L1-L3 未覆盖)
+    ├─ [并发] L1 粗召回  32D HNSW → top 200  (在 filtered_pool 上，非全库)
+    ├─ [并发] Sparse 召回 GIN BM25 → raw 40  (与 L1 同时发出独立 DB 查询)
+    ├─ L2 中召回 128D HNSW → top 80          (仅在 L1 结果集上)
+    ├─ L3 精召回 1024D HNSW → top 40         (仅在 L2 结果集上)
+    ├─ 补漏过滤：sparse 结果去除 L1∪L2∪L3 已覆盖候选人（真正补漏语义）
     │
     ├─ RRF 融合（手写，k=60）→ top 30
     │     score(d) = Σ 1/(60 + rank_i(d))
@@ -161,9 +175,21 @@ POST /search
     │
     ├─ 拉取 reranker_payload（仅 top 30，避免 OOM）
     ├─ Cross-Encoder Rerank → top K
+    │     final_score = 0.4·RRF + 0.6·rerank
     │
     └─ 返回 SearchResponse（含各层分数 + 延迟分解）
 ```
+
+### 工程痼疾修复记录
+
+| 问题 | 修复 |
+|------|------|
+| 全局 `_RNG = random.Random(42)` 共享可变状态，并发请求 RNG 交叉污染 | 每个 mock 函数使用由自身输入参数派生的确定性 RNG，零共享状态 |
+| `filtered_pool` 计算后从未使用，L1 仍在全库 500 人上召回 | L1 召回改为在 `filtered_pool` 上运行，Filter Gate 语义生效 |
+| Sparse 从全库返回，与 L1/L2/L3 大量重叠，"补漏"形同虚设 | Sparse 与 L1 并发，应用层过滤掉 `dense_covered` 集合，只保留真正新增候选人 |
+| `import numpy as np` 未使用的死导入 | 已删除 |
+| `import logging` 藏在函数体内 SLA 告警分支 | 移至模块顶层，使用 `logger = logging.getLogger(__name__)` |
+| `2.718 ** (-x)` 硬编码近似值 | 改为 `math.e ** (-x)` |
 
 ### 快速验证
 
