@@ -1,0 +1,168 @@
+{
+  "cert_id": "6ec6cd23-5bcc-43c5-acd2-3aed02016316",
+  "candidate_id": "demo-candidate-001",
+  "role": "Golang AI 后端工程师",
+  "issued_at": "2026-04-28T07:07:47.364722+00:00",
+  "expires_at": "2028-04-28T07:07:47.364722+00:00",
+  "combat_confidence": 0.65,
+  "radar_chart": [
+    {
+      "dimension_name": "系统设计",
+      "score": 60.4,
+      "percentile": 50.6,
+      "atom_ids_covered": [
+        833,
+        250,
+        401
+      ]
+    },
+    {
+      "dimension_name": "并发控制",
+      "score": 91.6,
+      "percentile": 58.4,
+      "atom_ids_covered": [
+        28,
+        374,
+        657
+      ]
+    },
+    {
+      "dimension_name": "故障降级",
+      "score": 69.7,
+      "percentile": 77.8,
+      "atom_ids_covered": [
+        389,
+        231,
+        254
+      ]
+    },
+    {
+      "dimension_name": "代码质量",
+      "score": 62.5,
+      "percentile": 60.2,
+      "atom_ids_covered": [
+        768,
+        318,
+        575,
+        892,
+        18
+      ]
+    },
+    {
+      "dimension_name": "调试能力",
+      "score": 41.1,
+      "percentile": 92.8,
+      "atom_ids_covered": [
+        302,
+        696,
+        745,
+        730,
+        783
+      ]
+    },
+    {
+      "dimension_name": "架构判断",
+      "score": 72.1,
+      "percentile": 55.5,
+      "atom_ids_covered": [
+        851,
+        648,
+        22
+      ]
+    }
+  ],
+  "top_abilities": [
+    {
+      "atom_id": 301,
+      "ability_name": "PostgreSQL 索引优化",
+      "score": 0.73,
+      "evidence_snippet": "在沙盒战役 event#9 中实际验证，耗时 6 分钟完成修复"
+    },
+    {
+      "atom_id": 88,
+      "ability_name": "内存泄漏诊断",
+      "score": 0.86,
+      "evidence_snippet": "在沙盒战役 event#9 中实际验证，耗时 9 分钟完成修复"
+    },
+    {
+      "atom_id": 200,
+      "ability_name": "微服务 RPC 设计",
+      "score": 0.69,
+      "evidence_snippet": "在沙盒战役 event#3 中实际验证，耗时 3 分钟完成修复"
+    },
+    {
+      "atom_id": 410,
+      "ability_name": "缓存穿透防护",
+      "score": 0.72,
+      "evidence_snippet": "在沙盒战役 event#10 中实际验证，耗时 7 分钟完成修复"
+    },
+    {
+      "atom_id": 145,
+      "ability_name": "Redis 分布式锁",
+      "score": 0.87,
+      "evidence_snippet": "在沙盒战役 event#2 中实际验证，耗时 13 分钟完成修复"
+    }
+  ],
+  "combat_highlights": [
+    {
+      "event_type": "timeout_defense",
+      "timestamp_sec": 175,
+      "description": "候选人在 Redis 宕机 场景下完成实时重构",
+      "score_impact": -0.07
+    },
+    {
+      "event_type": "bug_fix",
+      "timestamp_sec": 847,
+      "description": "候选人在 连接池耗尽 场景下完成实时重构",
+      "score_impact": 0.02
+    },
+    {
+      "event_type": "architecture_pivot",
+      "timestamp_sec": 2579,
+      "description": "候选人在 Redis 宕机 场景下完成实时重构",
+      "score_impact": -0.09
+    }
+  ],
+  "reranker_payload": "候选人在归心私有 RPC 框架沙盒中，于 12 分钟内定位并修复了 Redis 分布式锁死锁问题，展现了 强并发控制能力。X-RAG 注入 2 次异常，全部有效应对。verified_skills: PostgreSQL 索引优化, 内存泄漏诊断, 微服务 RPC 设计。",
+  "anti_forgery": {
+    "cert_id": "6ec6cd23-5bcc-43c5-acd2-3aed02016316",
+    "issued_at": "2026-04-28T07:07:47.364722+00:00",
+    "issuer": "HeartCert Oracle v2",
+    "algorithm": "HMAC-SHA256",
+    "signature": "180c36280d79b00ab9457110a6eab577355130444948e9df075f5da8cde2cf51"
+  },
+  "vec_32_summary": [
+    0.3413,
+    0.1314,
+    0.875,
+    0.9438,
+    0.7911,
+    0.2679,
+    0.5248,
+    0.8015,
+    0.734,
+    0.3967,
+    0.4302,
+    0.723,
+    0.8909,
+    0.5852,
+    0.1624,
+    0.2599,
+    0.7609,
+    0.162,
+    0.8387,
+    0.1067,
+    0.6004,
+    0.5547,
+    0.847,
+    0.5159,
+    0.7546,
+    0.0356,
+    0.1849,
+    0.6763,
+    0.3947,
+    0.6149,
+    0.1664,
+    0.2095
+  ]
+}

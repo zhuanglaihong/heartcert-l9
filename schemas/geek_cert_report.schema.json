@@ -1,0 +1,216 @@
+{
+  "$defs": {
+    "AntiForgeryStamp": {
+      "properties": {
+        "cert_id": {
+          "title": "Cert Id",
+          "type": "string"
+        },
+        "issued_at": {
+          "title": "Issued At",
+          "type": "string"
+        },
+        "issuer": {
+          "default": "HeartCert Oracle v2",
+          "title": "Issuer",
+          "type": "string"
+        },
+        "algorithm": {
+          "default": "HMAC-SHA256",
+          "title": "Algorithm",
+          "type": "string"
+        },
+        "signature": {
+          "title": "Signature",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cert_id",
+        "issued_at",
+        "signature"
+      ],
+      "title": "AntiForgeryStamp",
+      "type": "object"
+    },
+    "AtomAbility": {
+      "properties": {
+        "atom_id": {
+          "maximum": 1024,
+          "minimum": 1,
+          "title": "Atom Id",
+          "type": "integer"
+        },
+        "ability_name": {
+          "title": "Ability Name",
+          "type": "string"
+        },
+        "score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Score",
+          "type": "number"
+        },
+        "evidence_snippet": {
+          "title": "Evidence Snippet",
+          "type": "string"
+        }
+      },
+      "required": [
+        "atom_id",
+        "ability_name",
+        "score",
+        "evidence_snippet"
+      ],
+      "title": "AtomAbility",
+      "type": "object"
+    },
+    "CombatHighlight": {
+      "properties": {
+        "event_type": {
+          "title": "Event Type",
+          "type": "string"
+        },
+        "timestamp_sec": {
+          "title": "Timestamp Sec",
+          "type": "integer"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "score_impact": {
+          "title": "Score Impact",
+          "type": "number"
+        }
+      },
+      "required": [
+        "event_type",
+        "timestamp_sec",
+        "description",
+        "score_impact"
+      ],
+      "title": "CombatHighlight",
+      "type": "object"
+    },
+    "RadarDimension": {
+      "properties": {
+        "dimension_name": {
+          "title": "Dimension Name",
+          "type": "string"
+        },
+        "score": {
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "title": "Score",
+          "type": "number"
+        },
+        "percentile": {
+          "maximum": 100.0,
+          "minimum": 0.0,
+          "title": "Percentile",
+          "type": "number"
+        },
+        "atom_ids_covered": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Atom Ids Covered",
+          "type": "array"
+        }
+      },
+      "required": [
+        "dimension_name",
+        "score",
+        "percentile",
+        "atom_ids_covered"
+      ],
+      "title": "RadarDimension",
+      "type": "object"
+    }
+  },
+  "properties": {
+    "cert_id": {
+      "title": "Cert Id",
+      "type": "string"
+    },
+    "candidate_id": {
+      "title": "Candidate Id",
+      "type": "string"
+    },
+    "role": {
+      "title": "Role",
+      "type": "string"
+    },
+    "issued_at": {
+      "title": "Issued At",
+      "type": "string"
+    },
+    "expires_at": {
+      "title": "Expires At",
+      "type": "string"
+    },
+    "combat_confidence": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Combat Confidence",
+      "type": "number"
+    },
+    "radar_chart": {
+      "items": {
+        "$ref": "#/$defs/RadarDimension"
+      },
+      "maxItems": 6,
+      "minItems": 6,
+      "title": "Radar Chart",
+      "type": "array"
+    },
+    "top_abilities": {
+      "items": {
+        "$ref": "#/$defs/AtomAbility"
+      },
+      "title": "Top Abilities",
+      "type": "array"
+    },
+    "combat_highlights": {
+      "items": {
+        "$ref": "#/$defs/CombatHighlight"
+      },
+      "title": "Combat Highlights",
+      "type": "array"
+    },
+    "reranker_payload": {
+      "maxLength": 900,
+      "title": "Reranker Payload",
+      "type": "string"
+    },
+    "anti_forgery": {
+      "$ref": "#/$defs/AntiForgeryStamp"
+    },
+    "vec_32_summary": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 32,
+      "minItems": 32,
+      "title": "Vec 32 Summary",
+      "type": "array"
+    }
+  },
+  "required": [
+    "cert_id",
+    "candidate_id",
+    "role",
+    "issued_at",
+    "expires_at",
+    "combat_confidence",
+    "radar_chart",
+    "top_abilities",
+    "combat_highlights",
+    "reranker_payload",
+    "anti_forgery",
+    "vec_32_summary"
+  ],
+  "title": "GeekCertReport",
+  "type": "object"
+}
