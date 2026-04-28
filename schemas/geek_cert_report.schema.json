@@ -138,6 +138,10 @@
       "title": "Candidate Id",
       "type": "string"
     },
+    "session_id": {
+      "title": "Session Id",
+      "type": "string"
+    },
     "role": {
       "title": "Role",
       "type": "string"
@@ -149,6 +153,23 @@
     "expires_at": {
       "title": "Expires At",
       "type": "string"
+    },
+    "used_fallback": {
+      "default": false,
+      "title": "Used Fallback",
+      "type": "boolean"
+    },
+    "battle_duration_sec": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Battle Duration Sec"
     },
     "combat_confidence": {
       "maximum": 1.0,
@@ -200,6 +221,7 @@
   "required": [
     "cert_id",
     "candidate_id",
+    "session_id",
     "role",
     "issued_at",
     "expires_at",
