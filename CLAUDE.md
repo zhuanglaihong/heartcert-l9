@@ -15,6 +15,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 交付标准（180 分钟计时，始于 2026-04-28）
 
+**截止时间：2026-04-28 17:00**
+
 | 任务 | 权重 | 交付文件 |
 |------|------|----------|
 | Task 1：4 个 Agent System Prompt | 30% | `agents/*.py` |
