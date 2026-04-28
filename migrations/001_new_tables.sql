@@ -9,6 +9,26 @@ CREATE EXTENSION IF NOT EXISTS vector;
 
 
 -- ────────────────────────────────────────────────────────────
+-- 0. ability_library
+--    1024 个不可再分的原子能力静态底座（绝对不变表，只通过迁移脚本维护）。
+--    atom_id 是全系统能力体系的唯一锚点：
+--      - Agent 合约中的 AbilityEvidence.atom_id 引用此表
+--      - Oracle Judge 输出的 dense_vector_1024 的维度位置即 atom_id - 1
+--      - ability_taxonomy_nodes（1024层）通过 atom_id 与此表关联
+-- ────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS public.ability_library (
+    atom_id     SMALLINT    PRIMARY KEY CHECK (atom_id BETWEEN 1 AND 1024),
+    skill_name  VARCHAR(64) UNIQUE NOT NULL,
+    domain      VARCHAR(32) NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 此表为只读静态表，禁止业务代码直接 INSERT/UPDATE，只允许迁移脚本维护
+COMMENT ON TABLE public.ability_library IS
+    '1024 原子能力静态底座。只读，由迁移脚本维护，禁止业务代码写入。';
+
+
+-- ────────────────────────────────────────────────────────────
 -- 1. ability_taxonomy_nodes
 --    统一能力树，替代旧 dimensions + sub_skills 的双轨结构。
 --    layer 严格限制为 32 / 128 / 1024 三层，禁止随意添加层级。
@@ -19,7 +39,10 @@ CREATE TABLE IF NOT EXISTS public.ability_taxonomy_nodes (
     ability_name    TEXT        NOT NULL,
     layer           SMALLINT    NOT NULL CHECK (layer IN (32, 128, 1024)),
     parent_id       UUID        REFERENCES public.ability_taxonomy_nodes(id) ON DELETE RESTRICT,
-    vector_index    INT         NOT NULL,                  -- 在对应层向量中的位置索引
+    vector_index    INT         NOT NULL,                  -- 在对应层向量中的位置索引（0-based）
+    -- atom_id 仅 layer=1024 节点设置，与 ability_library 对齐（atom_id = vector_index + 1）
+    -- 是 Oracle Judge integer atom_id ↔ UUID ability_id 的桥接列
+    atom_id         SMALLINT    REFERENCES public.ability_library(atom_id) ON DELETE RESTRICT,
     status          TEXT        NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'deprecated')),
     metadata        JSONB       NOT NULL DEFAULT '{}',
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -27,6 +50,14 @@ CREATE TABLE IF NOT EXISTS public.ability_taxonomy_nodes (
         (layer = 32   AND vector_index BETWEEN 0 AND 31)  OR
         (layer = 128  AND vector_index BETWEEN 0 AND 127) OR
         (layer = 1024 AND vector_index BETWEEN 0 AND 1023)
+    ),
+    -- layer=1024 节点必须有 atom_id，其他层不得有 atom_id
+    CONSTRAINT chk_atom_id_only_for_leaf CHECK (
+        (layer = 1024 AND atom_id IS NOT NULL) OR
+        (layer IN (32, 128) AND atom_id IS NULL)
+    ),
+    CONSTRAINT chk_atom_id_matches_vector_index CHECK (
+        atom_id IS NULL OR atom_id = vector_index + 1
     )
 );
 
@@ -188,6 +219,8 @@ CREATE TABLE IF NOT EXISTS public.candidate_ability_contributions (
     weight          NUMERIC(8, 5)   NOT NULL DEFAULT 1.0,
     version         INT             NOT NULL DEFAULT 1,
     is_active       BOOLEAN         NOT NULL DEFAULT true,
+    -- grader_version 记录评分时使用的 Oracle Judge 版本，便于线上排错与回溯
+    grader_version  TEXT,
     created_at      TIMESTAMPTZ     NOT NULL DEFAULT now(),
     PRIMARY KEY (candidate_id, assessment_id, ability_id, version)
 );
@@ -273,12 +306,20 @@ CREATE INDEX IF NOT EXISTS idx_search_sessions_created_by
 CREATE TABLE IF NOT EXISTS public.search_candidate_scores (
     search_session_id   UUID            NOT NULL REFERENCES public.search_sessions(id) ON DELETE CASCADE,
     candidate_id        UUID            NOT NULL REFERENCES public.candidates(id) ON DELETE CASCADE,
+    -- 三层向量得分（对应 L1/L2/L3 召回层）
     score_32            NUMERIC(6, 5),
     score_128           NUMERIC(6, 5),
     score_1024          NUMERIC(6, 5),
+    -- GIN BM25 稀疏路得分（补漏路径）
+    score_sparse        NUMERIC(6, 5),
+    -- 硬过滤满足度（城市/薪资/经验，0/1 或连续值）
     score_filter        NUMERIC(6, 5),
+    -- 四路 RRF 融合得分（进 rerank 前的中间态，用于链路审计）
+    rrf_score           NUMERIC(8, 7),
+    -- Cross-Encoder 重排得分
     score_rerank        NUMERIC(6, 5),
     final_score         NUMERIC(6, 5),
+    -- 各层召回/淘汰原因，回答「某候选人在哪层被淘汰」
     explanations        JSONB           NOT NULL DEFAULT '{}',
     created_at          TIMESTAMPTZ     NOT NULL DEFAULT now(),
     PRIMARY KEY (search_session_id, candidate_id)

@@ -66,12 +66,39 @@ CREATE INDEX IF NOT EXISTS idx_candidates_profile_gin
     ON public.candidates
     USING GIN (profile_data);
 
--- 对 profile_data 内 verified_skills 数组建全文索引（补充稀疏文本召回）
+-- verified_skills 是 JSONB 数组，->> 返回 JSON 序列化文本（含方括号和引号），
+-- 必须用 jsonb_to_tsvector 才能正确拆解数组元素为词典。
 CREATE INDEX IF NOT EXISTS idx_candidates_verified_skills_fts
     ON public.candidates
     USING GIN (
-        to_tsvector('simple', COALESCE(profile_data->>'verified_skills', ''))
+        jsonb_to_tsvector('simple', COALESCE(profile_data->'verified_skills', '[]'::jsonb), '["string"]')
     );
+
+
+-- ────────────────────────────────────────────────────────────
+-- candidate_vectors — last_certified_at 索引（时间衰减因子查询）
+-- 时间衰减公式：actual_score = cosine × e^(-λΔt)，需高效过滤近期认证候选人
+-- ────────────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_cv_last_certified
+    ON public.candidate_vectors (last_certified_at DESC NULLS LAST)
+    WHERE last_certified_at IS NOT NULL;
+
+
+-- ────────────────────────────────────────────────────────────
+-- candidate_ability_contributions — 按 (candidate_id, ability_id) 快速重算快照
+-- 重做某 assessment 时，只需重算受影响候选人的特定 ability，此索引避免全表扫
+-- ────────────────────────────────────────────────────────────
+CREATE INDEX IF NOT EXISTS idx_cac_candidate_ability_active
+    ON public.candidate_ability_contributions (candidate_id, ability_id)
+    WHERE is_active = true;
+
+
+-- ────────────────────────────────────────────────────────────
+-- ability_taxonomy_nodes — atom_id 快速查找（Oracle Judge integer→UUID 桥接）
+-- ────────────────────────────────────────────────────────────
+CREATE UNIQUE INDEX IF NOT EXISTS idx_taxonomy_nodes_atom_id
+    ON public.ability_taxonomy_nodes (atom_id)
+    WHERE atom_id IS NOT NULL;
 
 
 -- ────────────────────────────────────────────────────────────

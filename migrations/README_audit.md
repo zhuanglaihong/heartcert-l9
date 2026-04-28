@@ -1,7 +1,4 @@
-# 老架构漏洞审计报告（Task 3 前置）
-
-> 基于逐行阅读 `docs/schema.md` 得出，每条缺陷均标注具体表名和字段名。
-> 本文档先于 DDL 交付，违反此顺序视为跳过架构审查。
+# 老架构漏洞审计报告
 
 ---
 
@@ -159,6 +156,43 @@ constraint interview_interactions_question_id_fkey foreign key (question_id) ref
 3. Oracle Judge 的评分结果无法精确溯源到具体题目，能力向量的可信度存疑。
 
 **修正方向：** 新建 `assessment_question_instances(id UUID PK, assessment_id, source_question_bank_id nullable, question_payload jsonb)`，动态生成题即时实例化并获得主键，`question_ability_bindings` 引用此表。
+
+---
+
+---
+
+## 缺陷补充 A：`ability_library` 静态底座完全缺失
+
+**缺陷本质：**
+老架构无 `ability_library` 表，`sub_skills` 是开放集合（可任意增删），全系统缺少 1024 原子能力的**静态锚点**。Agent 合约里的 `atom_id (1–1024)` 在数据库层没有对应 FK 约束，任何越界值或自造 ID 都能无声写入，数据完整性完全依赖应用层校验。
+
+**修正方向：** 新建 `ability_library(atom_id SMALLINT PK CHECK 1–1024, skill_name, domain)`，作为不可变静态表，全系统 FK 从此表出发。
+
+---
+
+## 缺陷补充 B：向量层与 atom_id 之间缺失桥接列
+
+**缺陷本质：**
+`ability_taxonomy_nodes` 使用 UUID 主键（用于图操作），但 Oracle Judge 输出整数 `atom_id`（来自 Agent 合约），运行时需全表扫 `ability_code` 做二次映射，无法 O(1) 定位。在千万级候选人的评分写入路径上，这是一个累积延迟炸弹。
+
+**修正方向：** 为 `ability_taxonomy_nodes` 的 layer=1024 节点增加 `atom_id SMALLINT REFERENCES ability_library`，并加 UNIQUE 索引，实现整数 atom_id → UUID ability_id 的 O(1) 查找。同时用 CHECK 约束强制：`layer=1024 → atom_id NOT NULL`，`layer IN (32,128) → atom_id IS NULL`。
+
+---
+
+## 缺陷补充 C：`to_tsvector` 直接作用于 JSONB 数组——BM25 稀疏路静默失效
+
+**涉及：** `002_indexes_hnsw.sql` 内 `idx_candidates_verified_skills_fts`
+
+**缺陷本质：**
+```sql
+-- 错误写法：
+to_tsvector('simple', COALESCE(profile_data->>'verified_skills', ''))
+-- profile_data->>'verified_skills' 返回 '["Golang","Redis"]'（含方括号和引号）
+-- to_tsvector 将其视为一整个词，无法拆解数组元素，FTS 匹配永远返回 0 结果
+```
+GIN 索引虽然建立成功，但所有 BM25 查询均命中空集，稀疏召回路**静默退化为全量缺失**，而非全表扫描——更危险，因为没有性能警报。
+
+**修正方向：** 改用 `jsonb_to_tsvector('simple', profile_data->'verified_skills', '["string"]')`，正确拆解 JSON 字符串数组为独立词元。
 
 ---
 
